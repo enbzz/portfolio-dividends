@@ -13,9 +13,8 @@ from googleapiclient.http import MediaIoBaseDownload
 def scarica_ultimo_csv_da_drive():
     """
     Si connette a Google Drive usando le credenziali salvate nell'ambiente
-    e scarica il file CSV più recente contenente i dati del portafoglio.
+    e scarica il file CSV più recente presente nella cartella specifica.
     """
-    # Legge le credenziali dalla variabile d'ambiente (iniettata da GitHub Secrets)
     creds_json = os.environ.get("GCP_SA_KEY_JSON")
     if not creds_json:
         print("Nessuna credenziale di Google Drive trovata nell'ambiente. Uso i file locali esistenti.")
@@ -28,17 +27,17 @@ def scarica_ultimo_csv_da_drive():
     
     service = build('drive', 'v3', credentials=creds)
     
-    # Cerca i file CSV nella cartella specifica di Google Drive
+    # Cerca tutti i file all'interno della cartella di Drive (senza blocchi sul mimeType)
     id_cartella_drive = "1yTIFk78JwlL-M40qvavgJ75nUhj2obpP"
-    query = f"'{id_cartella_drive}' in parents and mimeType = 'text/csv' and trashed = false"
+    query = f"'{id_cartella_drive}' in parents and trashed = false"
     
     results = service.files().list(
-        q=query, pageSize=10, fields="files(id, name, createdTime)"
+        q=query, pageSize=20, fields="files(id, name, createdTime)"
     ).execute()
     
     files = results.get('files', [])
     if not files:
-        raise FileNotFoundError("Nessun file CSV trovato nella cartella specificata su Google Drive.")
+        raise FileNotFoundError("Nessun file trovato nella cartella specificata su Google Drive.")
     
     # Ordina i file trovati per data di creazione (il più recente primo)
     files.sort(key=lambda x: x['createdTime'], reverse=True)
