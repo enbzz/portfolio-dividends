@@ -28,15 +28,17 @@ def scarica_ultimo_csv_da_drive():
     
     service = build('drive', 'v3', credentials=creds)
     
-    # Cerca i file CSV nel Drive
-    query = "mimeType = 'text/csv' and trashed = false"
+    # Cerca i file CSV nella cartella specifica di Google Drive
+    id_cartella_drive = "1yTIFk78JwlL-M40qvavgJ75nUhj2obpP"
+    query = f"'{id_cartella_drive}' in parents and mimeType = 'text/csv' and trashed = false"
+    
     results = service.files().list(
         q=query, pageSize=10, fields="files(id, name, createdTime)"
     ).execute()
     
     files = results.get('files', [])
     if not files:
-        raise FileNotFoundError("Nessun file CSV trovato su Google Drive.")
+        raise FileNotFoundError("Nessun file CSV trovato nella cartella specificata su Google Drive.")
     
     # Ordina i file trovati per data di creazione (il più recente primo)
     files.sort(key=lambda x: x['createdTime'], reverse=True)
