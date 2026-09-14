@@ -2,3 +2,4 @@ pandas
 yfinance
 google-api-python-client
 google-auth
+duckduckgo_search
