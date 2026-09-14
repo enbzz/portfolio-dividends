@@ -160,7 +160,7 @@ def recupera_e_proietta_dividendi(open_tickers):
         
     return dizionario_dividendi
 
-def genera_ics(dizionario_dividendi, output_ics_filename="cedole_portafoglio.ics"):
+def genera_ics(dizionario_dividendi, output_ics_filename="cedole_proiettate.ics"):
     righe_ics = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -257,10 +257,11 @@ def elabora_portafoglio():
 # --- ESECUZIONE ---
 scarica_ultimo_csv_da_drive()
 file_utilizzato, posizioni_aperte, posizioni_chiuse = elabora_portafoglio()
-dizionario_cedole = recupera_e_proietta_dividendi(posizioni_aperte)
+dizionario_dividendi = recupera_e_proietta_dividendi(posizioni_aperte)
 
-output_ics_filename = f"cedole_proiettate_{os.path.splitext(os.path.basename(file_utilizzato))[0]}.ics"
-genera_ics(dizionario_cedole, output_ics_filename)
+# Nome file ICS fisso e statico per Google Calendar
+output_ics_filename = "cedole_proiettate.ics"
+genera_ics(dizionario_dividendi, output_ics_filename)
 
 print(f"\nPosizioni APERTE ({len(posizioni_aperte)}): {sorted(list(posizioni_aperte))}")
 print(f"\nPosizioni CHIUSE ESCLUSE ({len(posizioni_chiuse)}): {sorted(list(posizioni_chiuse))}")
