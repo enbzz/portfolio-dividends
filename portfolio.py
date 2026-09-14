@@ -9,6 +9,7 @@ import yfinance as yf
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+from duckduckgo_search import DDGS
 
 def scarica_ultimo_csv_da_drive():
     creds_json = os.environ.get("GCP_SA_KEY_JSON")
@@ -80,13 +81,60 @@ def trova_file_csv_piu_recente(directory='.'):
     
     raise FileNotFoundError("Nessun file CSV valido con formato data (YYYYMMDD) trovato nella cartella.")
 
+def cerca_data_esatta_online(symbol, data_stimata):
+    """
+    Esegue una ricerca web mirata tramite DuckDuckGo per verificare 
+    la ex-dividend date ufficiale attorno alla data stimata.
+    """
+    MIDA_MESI = {
+        'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
+        'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12,
+        'gennaio': 1, 'febbraio': 3, 'marzo': 3, 'aprile': 4, 'maggio': 5, 'giugno': 6,
+        'luglio': 7, 'agosto': 8, 'settembre': 9, 'ottobre': 10, 'novembre': 11, 'dicembre': 12
+    }
+    
+    mese_str = data_stimata.strftime('%B').lower()
+    anno_str = data_stimata.strftime('%Y')
+    query = f"{symbol} ex dividend date {mese_str} {anno_str}"
+    
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=3))
+            for r in results:
+                snippet = r.get('body', '').lower()
+                # Cerca pattern di date nel testo dei risultati (es. "September 17, 2026" o "17 Sep 2026")
+                for nome_m, num_m in MIDA_MESI.items():
+                    if nome_m in snippet:
+                        # Estrae numeri vicini al nome del mese
+                        match = re.search(rf'({nome_m}\s+\d{{1,2}}(?:,\s*\d{{4}})?|\d{{1,2}}\s+{nome_m}(?:\s+\d{{4}})?)', snippet)
+                        if match:
+                            Trovata_str = match.group(0)
+                            # Parsing basico della data trovata
+                            cleaned = re.sub(r'[^\w\s]', '', Trovata_str)
+                            parts = cleaned.split()
+                            giorno = None
+                            for p in parts:
+                                if p.isdigit() and len(p) <= 2:
+                                    giorno = int(p)
+                                    break
+                            if giorno and 1 <= giorno <= 31:
+                                data_verificata = datetime(int(anno_str), num_m, giorno)
+                                # Valida che la data trovata sia vicina alla stima (entro 15 giorni)
+                                if abs((data_verificata - data_stimata).days) <= 15:
+                                    print(f"-> [WEB VERIFIED] Data ufficiale trovata per {symbol}: {data_verificata.strftime('%Y-%m-%d')}")
+                                    return data_verificata
+    except Exception as e:
+        print(f"Impossibile verificare online la data per {symbol}: {e}")
+        
+    return None
+
 def recupera_e_proietta_dividendi(open_tickers):
     dizionario_dividendi = {}
     oggi = datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
     fine_proiezione = datetime(2050, 12, 31)
     
     for symbol in open_tickers:
-        print(f"Elaborazione dividendi per: {symbol}...")
+        print(f"\nElaborazione dividendi per: {symbol}...")
         date_storiche = set()
         
         try:
@@ -110,7 +158,7 @@ def recupera_e_proietta_dividendi(open_tickers):
                     elif isinstance(ex_date_val, str):
                         data_ufficiale_futura = datetime.strptime(ex_date_val[:10], '%Y-%m-%d')
         except Exception as e:
-            print(f"Impossibile leggere il calendario ufficiale per {symbol}: {e}")
+            pass
 
         eventi_ticker = []
         
@@ -122,7 +170,6 @@ def recupera_e_proietta_dividendi(open_tickers):
         if data_ufficiale_futura and data_ufficiale_futura > oggi:
             eventi_ticker.append((data_ufficiale_futura, 'CONFERMATO'))
             ha_data_ufficiale_futura = True
-            print(f"-> Trovata ex-date ufficiale annunciata per {symbol}: {data_ufficiale_futura.strftime('%Y-%m-%d')}")
 
         date_ordinate = sorted(list(date_storiche))
         if len(date_ordinate) > 0:
@@ -145,9 +192,18 @@ def recupera_e_proietta_dividendi(open_tickers):
             punto_partenza = data_ufficiale_futura if ha_data_ufficiale_futura else ultima_data
             prossima_data = punto_partenza + timedelta(days=intervallo_giorni)
             
+            # Genera proiezioni future
             while prossima_data <= fine_proiezione:
                 if prossima_data > oggi and not (ha_data_ufficiale_futura and prossima_data == data_ufficiale_futura):
-                    eventi_ticker.append((prossima_data, 'PROIETTO'))
+                    # Se l'evento proiettato è nel breve termine (es. nei prossimi 35 giorni), verifica online la data esatta
+                    if (prossima_data - oggi).days <= 35:
+                        data_reale = cerca_data_esatta_online(symbol, prossima_data)
+                        if data_reale:
+                            eventi_ticker.append((data_reale, 'CONFERMATO'))
+                        else:
+                            eventi_ticker.append((prossima_data, 'PROIETTO'))
+                    else:
+                        eventi_ticker.append((prossima_data, 'PROIETTO'))
                 prossima_data += timedelta(days=intervallo_giorni)
                 
         eventi_unici = {}
@@ -181,7 +237,7 @@ def genera_ics(dizionario_dividendi, output_ics_filename="cedole_proiettate.ics"
             else:
                 uid = f"dividend-conf-{symbol}-{dt_str}@portafoglio"
                 summary = f"Stacco Cedola: {symbol}"
-                description = f"Data di stacco / pagamento confermata da dati ufficiali/storici per la posizione {symbol}."
+                description = f"Data di stacco / pagamento confermata da dati ufficiali o verificata online per la posizione {symbol}."
             
             righe_ics.extend([
                 "BEGIN:VEVENT",
@@ -244,7 +300,7 @@ def elabora_portafoglio():
         return len(buys_after_sell) == 0
 
     closed_tickers = set()
-    open_tickers = set()
+    open_tickers in set()
 
     for symbol, group in df_clean.groupby('Symbol', sort=False):
         if is_position_closed(group):
@@ -254,12 +310,11 @@ def elabora_portafoglio():
 
     return file_csv, open_tickers, closed_tickers
 
-# --- ESECUZIONE ---
+# Assicurati di aggiungere 'duckduckgo_search' alle dipendenze (es. requirements.txt)
 scarica_ultimo_csv_da_drive()
 file_utilizzato, posizioni_aperte, posizioni_chiuse = elabora_portafoglio()
 dizionario_dividendi = recupera_e_proietta_dividendi(posizioni_aperte)
 
-# Nome file ICS fisso e statico per Google Calendar
 output_ics_filename = "cedole_proiettate.ics"
 genera_ics(dizionario_dividendi, output_ics_filename)
 
