@@ -97,6 +97,8 @@ def cerca_data_esatta_online(symbol, data_stimata):
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=5))
+            if not results:
+                print(f"-> [WEB SEARCH] Nessun risultato restituito da DuckDuckGo per {symbol} (possibile blocco IP CI).")
             for r in results:
                 snippet = r.get('body', '').lower()
                 for nome_m, num_m in MIDA_MESI.items():
@@ -123,7 +125,7 @@ def cerca_data_esatta_online(symbol, data_stimata):
                                 except ValueError:
                                     continue
     except Exception as e:
-        print(f"Impossibile verificare online la data per {symbol}: {e}")
+        print(f"-> [WEB SEARCH ERROR] Impossibile verificare online la data per {symbol}: {e}")
         
     return None
 
@@ -149,15 +151,25 @@ def recupera_e_proietta_dividendi(open_tickers):
         data_ufficiale_futura = None
         try:
             cal = ticker_obj.calendar
-            if cal and isinstance(cal, dict):
+            if isinstance(cal, dict):
                 ex_date_val = cal.get('Ex-Dividend Date') or cal.get('exDividendDate')
                 if ex_date_val:
                     if isinstance(ex_date_val, datetime):
                         data_ufficiale_futura = ex_date_val.replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
                     elif isinstance(ex_date_val, str):
                         data_ufficiale_futura = datetime.strptime(ex_date_val[:10], '%Y-%m-%d')
+            elif isinstance(cal, pd.DataFrame) and not cal.empty:
+                for idx in ['Ex-Dividend Date', 'exDividendDate']:
+                    if idx in cal.index:
+                        ex_date_val = cal.loc[idx].iloc[0]
+                        if pd.notna(ex_date_val):
+                            data_ufficiale_futura = pd.to_datetime(ex_date_val).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+                            break
         except Exception as e:
-            pass
+            print(f"Nota: impossibile leggere il calendario nativo yfinance per {symbol}: {e}")
+
+        if data_ufficiale_futura:
+            print(f"-> [YFINANCE CALENDAR] Data ufficiale trovata via yfinance per {symbol}: {data_ufficiale_futura.strftime('%Y-%m-%d')}")
 
         eventi_ticker = []
         
