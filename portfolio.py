@@ -81,10 +81,6 @@ def trova_file_csv_piu_recente(directory='.'):
     raise FileNotFoundError("Nessun file CSV valido con formato data (YYYYMMDD) trovato nella cartella.")
 
 def recupera_e_proietta_dividendi(open_tickers):
-    """
-    Combina lo storico dei dividendi, verifica il calendario ufficiale Yahoo Finance 
-    per le ex-date future annunciate, e proietta matematicamente solo se necessario.
-    """
     dizionario_dividendi = {}
     oggi = datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
     fine_proiezione = datetime(2050, 12, 31)
@@ -93,7 +89,6 @@ def recupera_e_proietta_dividendi(open_tickers):
         print(f"Elaborazione dividendi per: {symbol}...")
         date_storiche = set()
         
-        # 1. Recupero storico passato da yfinance
         try:
             ticker_obj = yf.Ticker(symbol)
             divs = ticker_obj.dividends
@@ -104,12 +99,10 @@ def recupera_e_proietta_dividendi(open_tickers):
         except Exception as e:
             print(f"Impossibile recuperare i dividendi storici da yfinance per {symbol}: {e}")
             
-        # 2. Controllo del calendario ufficiale Yahoo Finance per ex-date future annunciate
         data_ufficiale_futura = None
         try:
             cal = ticker_obj.calendar
             if cal and isinstance(cal, dict):
-                # Le chiavi possono variare leggermente a seconda della versione di yfinance
                 ex_date_val = cal.get('Ex-Dividend Date') or cal.get('exDividendDate')
                 if ex_date_val:
                     if isinstance(ex_date_val, datetime):
@@ -121,19 +114,16 @@ def recupera_e_proietta_dividendi(open_tickers):
 
         eventi_ticker = []
         
-        # Inserisce tutti gli eventi passati o odierni come CONFERMATI dallo storico
         for d in sorted(list(date_storiche)):
             if d <= oggi:
                 eventi_ticker.append((d, 'CONFERMATO'))
 
-        # Se Yahoo fornisce un'ex-date ufficiale futura, la aggiungiamo come CONFERMATO
         ha_data_ufficiale_futura = False
         if data_ufficiale_futura and data_ufficiale_futura > oggi:
             eventi_ticker.append((data_ufficiale_futura, 'CONFERMATO'))
             ha_data_ufficiale_futura = True
-            print(-> Trovata ex-date ufficiale annunciata per {symbol}: {data_ufficiale_futura.strftime('%Y-%m-%d')})
+            print(f"-> Trovata ex-date ufficiale annunciata per {symbol}: {data_ufficiale_futura.strftime('%Y-%m-%d')}")
 
-        # 3. Proiezione futura basata sulla frequenza storica
         date_ordinate = sorted(list(date_storiche))
         if len(date_ordinate) > 0:
             if len(date_ordinate) > 1:
@@ -152,22 +142,16 @@ def recupera_e_proietta_dividendi(open_tickers):
                 intervallo_giorni = 365
 
             ultima_data = date_ordinate[-1]
-            
-            # Se abbiamo trovato un'ex-date ufficiale futura, partiamo da quella per le proiezioni successive,
-            # altrimenti partiamo dall'ultima data storica registrata.
             punto_partenza = data_ufficiale_futura if ha_data_ufficiale_futura else ultima_data
             prossima_data = punto_partenza + timedelta(days=intervallo_giorni)
             
-            # Se partiamo da una data ufficiale, evitiamo di duplicarla se già inserita
             while prossima_data <= fine_proiezione:
                 if prossima_data > oggi and not (ha_data_ufficiale_futura and prossima_data == data_ufficiale_futura):
                     eventi_ticker.append((prossima_data, 'PROIETTO'))
                 prossima_data += timedelta(days=intervallo_giorni)
                 
-        # Rimuove eventuali duplicati ordinando per data
         eventi_unici = {}
         for dt, tipo in eventi_ticker:
-            # Se c'è conflitto sulla stessa data, diamo priorità a 'CONFERMATO'
             if dt not in eventi_unici or tipo == 'CONFERMATO':
                 eventi_unici[dt] = tipo
                 
