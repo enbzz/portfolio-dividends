@@ -11,10 +11,6 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
 def scarica_ultimo_csv_da_drive():
-    """
-    Si connette a Google Drive usando le credenziali salvate nell'ambiente
-    e scarica il file CSV più recente presente nella cartella specifica.
-    """
     creds_json = os.environ.get("GCP_SA_KEY_JSON")
     if not creds_json:
         print("Nessuna credenziale di Google Drive trovata nell'ambiente. Uso i file locali esistenti.")
@@ -26,8 +22,6 @@ def scarica_ultimo_csv_da_drive():
     )
     
     service = build('drive', 'v3', credentials=creds)
-    
-    # Cerca tutti i file all'interno della cartella di Drive (senza blocchi sul mimeType)
     id_cartella_drive = "1yTIFk78JwlL-M40qvavgJ75nUhj2obpP"
     query = f"'{id_cartella_drive}' in parents and trashed = false"
     
@@ -39,7 +33,6 @@ def scarica_ultimo_csv_da_drive():
     if not files:
         raise FileNotFoundError("Nessun file trovato nella cartella specificata su Google Drive.")
     
-    # Ordina i file trovati per data di creazione (il più recente primo)
     files.sort(key=lambda x: x['createdTime'], reverse=True)
     piu_recente = files[0]
     
@@ -47,7 +40,6 @@ def scarica_ultimo_csv_da_drive():
     file_name = piu_recente['name']
     print(f"Trovato file su Google Drive: {file_name} (ID: {file_id})")
     
-    # Download del file
     request = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
@@ -90,37 +82,65 @@ def trova_file_csv_piu_recente(directory='.'):
 
 def recupera_e_proietta_dividendi(open_tickers):
     """
-    Recupera lo storico da yfinance e proietta le date future se non coprono l'orizzonte temporale,
-    restituendo un dizionario con tuple (data, tipo_origine) dove tipo_origine è 'CONFERMATO' o 'PROIETTO'.
+    Combina lo storico dei dividendi, verifica il calendario ufficiale Yahoo Finance 
+    per le ex-date future annunciate, e proietta matematicamente solo se necessario.
     """
     dizionario_dividendi = {}
-    oggi = datetime.today()
+    oggi = datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
     fine_proiezione = datetime(2050, 12, 31)
     
     for symbol in open_tickers:
         print(f"Elaborazione dividendi per: {symbol}...")
-        date_storiche = []
+        date_storiche = set()
+        
+        # 1. Recupero storico passato da yfinance
         try:
             ticker_obj = yf.Ticker(symbol)
             divs = ticker_obj.dividends
             if not divs.empty:
-                date_storiche = [ts.to_pydatetime().replace(tzinfo=None) for ts in divs.index]
+                for ts in divs.index:
+                    d = ts.to_pydatetime().replace(tzinfo=None)
+                    date_storiche.add(d)
         except Exception as e:
-            print(f"Impossibile recuperare i dividendi da yfinance per {symbol}: {e}")
+            print(f"Impossibile recuperare i dividendi storici da yfinance per {symbol}: {e}")
             
+        # 2. Controllo del calendario ufficiale Yahoo Finance per ex-date future annunciate
+        data_ufficiale_futura = None
+        try:
+            cal = ticker_obj.calendar
+            if cal and isinstance(cal, dict):
+                # Le chiavi possono variare leggermente a seconda della versione di yfinance
+                ex_date_val = cal.get('Ex-Dividend Date') or cal.get('exDividendDate')
+                if ex_date_val:
+                    if isinstance(ex_date_val, datetime):
+                        data_ufficiale_futura = ex_date_val.replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+                    elif isinstance(ex_date_val, str):
+                        data_ufficiale_futura = datetime.strptime(ex_date_val[:10], '%Y-%m-%d')
+        except Exception as e:
+            print(f"Impossibile leggere il calendario ufficiale per {symbol}: {e}")
+
         eventi_ticker = []
-        # Segna come storici/confermati quelli passati o presenti
-        for d in sorted(list(set(date_storiche))):
-            eventi_ticker.append((d, 'CONFERMATO'))
-            
-        # Se abbiamo uno storico, calcoliamo la frequenza per proiettare il futuro
-        if len(date_storiche) > 0:
-            date_ordinate = sorted(list(set(date_storiche)))
+        
+        # Inserisce tutti gli eventi passati o odierni come CONFERMATI dallo storico
+        for d in sorted(list(date_storiche)):
+            if d <= oggi:
+                eventi_ticker.append((d, 'CONFERMATO'))
+
+        # Se Yahoo fornisce un'ex-date ufficiale futura, la aggiungiamo come CONFERMATO
+        ha_data_ufficiale_futura = False
+        if data_ufficiale_futura and data_ufficiale_futura > oggi:
+            eventi_ticker.append((data_ufficiale_futura, 'CONFERMATO'))
+            ha_data_ufficiale_futura = True
+            print(-> Trovata ex-date ufficiale annunciata per {symbol}: {data_ufficiale_futura.strftime('%Y-%m-%d')})
+
+        # 3. Proiezione futura basata sulla frequenza storica
+        date_ordinate = sorted(list(date_storiche))
+        if len(date_ordinate) > 0:
             if len(date_ordinate) > 1:
                 diffs = [(date_ordinate[i+1] - date_ordinate[i]).days for i in range(len(date_ordinate)-1)]
                 media_diff = sum(diffs) / len(diffs)
             else:
-                media_diff = 365 # Default annuale se c'è una sola data
+                media_diff = 365
                 
             if media_diff <= 45:
                 intervallo_giorni = 30
@@ -132,22 +152,31 @@ def recupera_e_proietta_dividendi(open_tickers):
                 intervallo_giorni = 365
 
             ultima_data = date_ordinate[-1]
-            prossima_data = ultima_data + timedelta(days=intervallo_giorni)
             
-            # Proietta fino al 2050
+            # Se abbiamo trovato un'ex-date ufficiale futura, partiamo da quella per le proiezioni successive,
+            # altrimenti partiamo dall'ultima data storica registrata.
+            punto_partenza = data_ufficiale_futura if ha_data_ufficiale_futura else ultima_data
+            prossima_data = punto_partenza + timedelta(days=intervallo_giorni)
+            
+            # Se partiamo da una data ufficiale, evitiamo di duplicarla se già inserita
             while prossima_data <= fine_proiezione:
-                if prossima_data > oggi: # Aggiunge solo se è nel futuro
+                if prossima_data > oggi and not (ha_data_ufficiale_futura and prossima_data == data_ufficiale_futura):
                     eventi_ticker.append((prossima_data, 'PROIETTO'))
                 prossima_data += timedelta(days=intervallo_giorni)
                 
-        dizionario_dividendi[symbol] = sorted(eventi_ticker, key=lambda x: x[0])
+        # Rimuove eventuali duplicati ordinando per data
+        eventi_unici = {}
+        for dt, tipo in eventi_ticker:
+            # Se c'è conflitto sulla stessa data, diamo priorità a 'CONFERMATO'
+            if dt not in eventi_unici or tipo == 'CONFERMATO':
+                eventi_unici[dt] = tipo
+                
+        lista_finale = sorted([(dt, tipo) for dt, tipo in eventi_unici.items()], key=lambda x: x[0])
+        dizionario_dividendi[symbol] = lista_finale
         
     return dizionario_dividendi
 
 def genera_ics(dizionario_dividendi, output_ics_filename="cedole_portafoglio.ics"):
-    """
-    Genera il file ICS distinguendo gli eventi confermati da quelli stimati/proiettati.
-    """
     righe_ics = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -168,7 +197,7 @@ def genera_ics(dizionario_dividendi, output_ics_filename="cedole_portafoglio.ics
             else:
                 uid = f"dividend-conf-{symbol}-{dt_str}@portafoglio"
                 summary = f"Stacco Cedola: {symbol}"
-                description = f"Data di stacco / pagamento confermata da storico per la posizione {symbol}."
+                description = f"Data di stacco / pagamento confermata da dati ufficiali/storici per la posizione {symbol}."
             
             righe_ics.extend([
                 "BEGIN:VEVENT",
@@ -193,14 +222,35 @@ def elabora_portafoglio():
     print(f"File selezionato per l'elaborazione: {file_csv}")
 
     df = pd.read_csv(file_csv)
+    df.columns = [str(col).strip() for col in df.columns]
+    
+    col_map = {}
+    for col in df.columns:
+        col_lower = col.lower()
+        if col_lower == 'symbol':
+            col_map['Symbol'] = col
+        elif col_lower == 'type':
+            col_map['Type'] = col
+        elif col_lower == 'id':
+            col_map['Id'] = col
 
-    df_clean = df[df['Symbol'].notna()].copy()
-    df_clean['Symbol'] = df_clean['Symbol'].str.strip()
-    df_clean['Type_clean'] = df_clean['Type'].astype(str).str.strip().str.lower()
+    if 'Symbol' not in col_map or 'Type' not in col_map:
+        raise KeyError(f"Colonne necessarie non trovate nel CSV. Colonne disponibili: {list(df.columns)}")
+
+    s_col = col_map['Symbol']
+    t_col = col_map['Type']
+    id_col = col_map.get('Id', df.columns[0])
+
+    df_clean = df[df[s_col].notna()].copy()
+    df_clean['Symbol'] = df_clean[s_col].str.strip()
+    df_clean['Type_clean'] = df_clean[t_col].astype(str).str.strip().str.lower()
     df_clean = df_clean[~df_clean['Symbol'].str.contains('CASH|=X', case=False, na=False)].copy()
 
     def is_position_closed(group):
-        group_sorted = group.sort_values('Id')
+        if id_col in group.columns:
+            group_sorted = group.sort_values(id_col)
+        else:
+            group_sorted = group
         types = group_sorted['Type_clean'].tolist()
         sell_all_indices = [i for i, t in enumerate(types) if t == 'sell all']
         if not sell_all_indices:
@@ -221,10 +271,7 @@ def elabora_portafoglio():
     return file_csv, open_tickers, closed_tickers
 
 # --- ESECUZIONE ---
-# 1. Scarica il CSV aggiornato da Google Drive (sfruttando il Secret)
 scarica_ultimo_csv_da_drive()
-
-# 2. Elabora il portafoglio e genera le proiezioni
 file_utilizzato, posizioni_aperte, posizioni_chiuse = elabora_portafoglio()
 dizionario_cedole = recupera_e_proietta_dividendi(posizioni_aperte)
 
