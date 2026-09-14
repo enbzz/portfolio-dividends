@@ -83,38 +83,45 @@ def trova_file_csv_piu_recente(directory='.'):
 
 def cerca_data_esatta_online(symbol, data_stimata):
     MIDA_MESI = {
-        'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
-        'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12,
+        'january': 1, 'jan': 1, 'february': 2, 'feb': 2, 'march': 3, 'mar': 3, 
+        'april': 4, 'apr': 4, 'may': 5, 'june': 6, 'jun': 6,
+        'july': 7, 'jul': 7, 'august': 8, 'aug': 8, 'september': 9, 'sep': 9, 'sept': 9, 
+        'october': 10, 'oct': 10, 'november': 11, 'nov': 11, 'december': 12, 'dec': 12,
         'gennaio': 1, 'febbraio': 2, 'marzo': 3, 'aprile': 4, 'maggio': 5, 'giugno': 6,
         'luglio': 7, 'agosto': 8, 'settembre': 9, 'ottobre': 10, 'novembre': 11, 'dicembre': 12
     }
     
-    mese_str = data_stimata.strftime('%B').lower()
     anno_str = data_stimata.strftime('%Y')
-    query = f"{symbol} ex dividend date {mese_str} {anno_str}"
+    query = f"{symbol} ex dividend date {anno_str}"
     
     try:
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=3))
+            results = list(ddgs.text(query, max_results=5))
             for r in results:
                 snippet = r.get('body', '').lower()
                 for nome_m, num_m in MIDA_MESI.items():
                     if nome_m in snippet:
-                        match = re.search(rf'({nome_m}\s+\d{{1,2}}(?:,\s*\d{{4}})?|\d{{1,2}}\s+{nome_m}(?:\s+\d{{4}})?)', snippet)
+                        match = re.search(rf'(\b\d{{1,2}}\s+{nome_m}\s+\d{{4}}|\b{nome_m}\s+\d{{1,2}},\s*\d{{4}}|\b\d{{1,2}}\s+{nome_m}|\b{nome_m}\s+\d{{1,2}})', snippet)
                         if match:
                             trovata_str = match.group(0)
-                            cleaned = re.sub(r'[^\w\s]', '', trovata_str)
-                            parts = cleaned.split()
+                            parts = re.findall(r'\d+', trovata_str)
                             giorno = None
+                            anno = int(anno_str)
+                            
                             for p in parts:
-                                if p.isdigit() and len(p) <= 2:
+                                if len(p) <= 2 and 1 <= int(p) <= 31:
                                     giorno = int(p)
-                                    break
-                            if giorno and 1 <= giorno <= 31:
-                                data_verificata = datetime(int(anno_str), num_m, giorno)
-                                if abs((data_verificata - data_stimata).days) <= 15:
-                                    print(f"-> [WEB VERIFIED] Data ufficiale trovata per {symbol}: {data_verificata.strftime('%Y-%m-%d')}")
-                                    return data_verificata
+                                elif len(p) == 4:
+                                    anno = int(p)
+                                    
+                            if giorno:
+                                try:
+                                    data_verificata = datetime(anno, num_m, giorno)
+                                    if abs((data_verificata - data_stimata).days) <= 45:
+                                        print(f"-> [WEB VERIFIED] Data ufficiale trovata per {symbol}: {data_verificata.strftime('%Y-%m-%d')}")
+                                        return data_verificata
+                                except ValueError:
+                                    continue
     except Exception as e:
         print(f"Impossibile verificare online la data per {symbol}: {e}")
         
