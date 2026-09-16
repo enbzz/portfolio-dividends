@@ -11,6 +11,14 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from duckduckgo_search import DDGS
 
+# Dizionario di override manuale per date ufficiali (supporta sia ex_date che pay_date)
+OVERRIDE_DATE_UFFICIALI = {
+    "IBTS.SW": {
+        "ex_date": datetime(2026, 9, 18),
+        "pay_date": datetime(2026, 9, 30)
+    },
+}
+
 def scarica_ultimo_csv_da_drive():
     creds_json = os.environ.get("GCP_SA_KEY_JSON")
     if not creds_json:
@@ -120,7 +128,7 @@ def cerca_data_esatta_online(symbol, data_stimata):
                                 try:
                                     data_verificata = datetime(anno, num_m, giorno)
                                     if abs((data_verificata - data_stimata).days) <= 45:
-                                        print(f"-> [WEB VERIFIED] Data ufficiale trovata per {symbol}: {data_verificata.strftime('%Y-%m-%d')}")
+                                        print(f"-> [WEB VERIFIED] Data ex-dividend ufficiale trovata per {symbol}: {data_verificata.strftime('%Y-%m-%d')}")
                                         return data_verificata
                                 except ValueError:
                                     continue
@@ -148,40 +156,76 @@ def recupera_e_proietta_dividendi(open_tickers):
         except Exception as e:
             print(f"Impossibile recuperare i dividendi storici da yfinance per {symbol}: {e}")
             
-        data_ufficiale_futura = None
+        # Estrazione calendario nativo yfinance
+        data_ufficiale_ex = None
+        data_ufficiale_pay = None
         try:
             cal = ticker_obj.calendar
+            def parse_date_val(val):
+                if isinstance(val, datetime):
+                    return val.replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+                elif isinstance(val, str):
+                    return datetime.strptime(val[:10], '%Y-%m-%d')
+                elif pd.notna(val):
+                    return pd.to_datetime(val).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+                return None
+
             if isinstance(cal, dict):
-                ex_date_val = cal.get('Ex-Dividend Date') or cal.get('exDividendDate')
-                if ex_date_val:
-                    if isinstance(ex_date_val, datetime):
-                        data_ufficiale_futura = ex_date_val.replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
-                    elif isinstance(ex_date_val, str):
-                        data_ufficiale_futura = datetime.strptime(ex_date_val[:10], '%Y-%m-%d')
+                ex_val = cal.get('Ex-Dividend Date') or cal.get('exDividendDate')
+                pay_val = cal.get('Payout Date') or cal.get('payoutDate') or cal.get('Payment Date') or cal.get('paymentDate')
+                data_ufficiale_ex = parse_date_val(ex_val)
+                data_ufficiale_pay = parse_date_val(pay_val)
             elif isinstance(cal, pd.DataFrame) and not cal.empty:
                 for idx in ['Ex-Dividend Date', 'exDividendDate']:
                     if idx in cal.index:
-                        ex_date_val = cal.loc[idx].iloc[0]
-                        if pd.notna(ex_date_val):
-                            data_ufficiale_futura = pd.to_datetime(ex_date_val).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
-                            break
+                        data_ufficiale_ex = parse_date_val(cal.loc[idx].iloc[0])
+                        break
+                for idx in ['Payout Date', 'payoutDate', 'Payment Date', 'paymentDate']:
+                    if idx in cal.index:
+                        data_ufficiale_pay = parse_date_val(cal.loc[idx].iloc[0])
+                        break
         except Exception as e:
             print(f"Nota: impossibile leggere il calendario nativo yfinance per {symbol}: {e}")
 
-        if data_ufficiale_futura:
-            print(f"-> [YFINANCE CALENDAR] Data ufficiale trovata via yfinance per {symbol}: {data_ufficiale_futura.strftime('%Y-%m-%d')}")
+        # Applicazione eventuale override manuale
+        if symbol in OVERRIDE_DATE_UFFICIALI:
+            override = OVERRIDE_DATE_UFFICIALI[symbol]
+            if "ex_date" in override:
+                data_ufficiale_ex = override["ex_date"]
+            if "pay_date" in override:
+                data_ufficiale_pay = override["pay_date"]
+            print(f"-> [OVERRIDE MANUALE] Applicato per {symbol}")
+
+        if data_ufficiale_ex:
+            print(f"-> [YFINANCE CALENDAR] Ex-Date ufficiale trovata per {symbol}: {data_ufficiale_ex.strftime('%Y-%m-%d')}")
+        if data_ufficiale_pay:
+            print(f"-> [YFINANCE CALENDAR] Payment Date ufficiale trovata per {symbol}: {data_ufficiale_pay.strftime('%Y-%m-%d')}")
 
         eventi_ticker = []
         
+        # Eventi storici passati
         for d in sorted(list(date_storiche)):
             if d <= oggi:
-                eventi_ticker.append((d, 'CONFERMATO'))
+                # Per lo storico, ex-date è confermata, pagamento stimato (ex_date + 5 giorni)
+                pay_d = d + timedelta(days=5)
+                eventi_ticker.append({
+                    'ex_date': d, 'ex_type': 'CONFERMATO',
+                    'pay_date': pay_d, 'pay_type': 'PROIETTO'
+                })
 
         ha_data_ufficiale_futura = False
-        if data_ufficiale_futura and data_ufficiale_futura > oggi:
-            eventi_ticker.append((data_ufficiale_futura, 'CONFERMATO'))
+        if data_ufficiale_ex and data_ufficiale_ex > oggi:
+            ex_t = 'CONFERMATO'
+            pay_d = data_ufficiale_pay if data_ufficiale_pay else (data_ufficiale_ex + timedelta(days=5))
+            pay_t = 'CONFERMATO' if data_ufficiale_pay else 'PROIETTO'
+            
+            eventi_ticker.append({
+                'ex_date': data_ufficiale_ex, 'ex_type': ex_t,
+                'pay_date': pay_d, 'pay_type': pay_t
+            })
             ha_data_ufficiale_futura = True
 
+        # Proiezioni future basate su frequenza storica
         date_ordinate = sorted(list(date_storiche))
         if len(date_ordinate) > 0:
             if len(date_ordinate) > 1:
@@ -200,27 +244,37 @@ def recupera_e_proietta_dividendi(open_tickers):
                 intervallo_giorni = 365
 
             ultima_data = date_ordinate[-1]
-            punto_partenza = data_ufficiale_futura if ha_data_ufficiale_futura else ultima_data
+            punto_partenza = data_ufficiale_ex if ha_data_ufficiale_futura else ultima_data
             prossima_data = punto_partenza + timedelta(days=intervallo_giorni)
             
             while prossima_data <= fine_proiezione:
-                if prossima_data > oggi and not (ha_data_ufficiale_futura and prossima_data == data_ufficiale_futura):
+                if prossima_data > oggi and not (ha_data_ufficiale_futura and prossima_data == data_ufficiale_ex):
+                    ex_d = prossima_data
+                    ex_t = 'PROIETTO'
+                    
                     if (prossima_data - oggi).days <= 35:
-                        data_reale = cerca_data_esatta_online(symbol, prossima_data)
-                        if data_reale:
-                            eventi_ticker.append((data_reale, 'CONFERMATO'))
-                        else:
-                            eventi_ticker.append((prossima_data, 'PROIETTO'))
-                    else:
-                        eventi_ticker.append((prossima_data, 'PROIETTO'))
+                        data_reale_web = cerca_data_esatta_online(symbol, prossima_data)
+                        if data_reale_web:
+                            ex_d = data_reale_web
+                            ex_t = 'CONFERMATO'
+                    
+                    pay_d = ex_d + timedelta(days=5)
+                    pay_t = 'PROIETTO'
+                    
+                    eventi_ticker.append({
+                        'ex_date': ex_d, 'ex_type': ex_t,
+                        'pay_date': pay_d, 'pay_type': pay_t
+                    })
                 prossima_data += timedelta(days=intervallo_giorni)
                 
+        # Deduplicazione basata sulla ex_date
         eventi_unici = {}
-        for dt, tipo in eventi_ticker:
-            if dt not in eventi_unici or tipo == 'CONFERMATO':
-                eventi_unici[dt] = tipo
+        for ev in eventi_ticker:
+            ed = ev['ex_date']
+            if ed not in eventi_unici or ev['ex_type'] == 'CONFERMATO':
+                eventi_unici[ed] = ev
                 
-        lista_finale = sorted([(dt, tipo) for dt, tipo in eventi_unici.items()], key=lambda x: x[0])
+        lista_finale = sorted(list(eventi_unici.values()), key=lambda x: x['ex_date'])
         dizionario_dividendi[symbol] = lista_finale
         
     return dizionario_dividendi
@@ -235,27 +289,57 @@ def genera_ics(dizionario_dividendi, output_ics_filename="cedole_proiettate.ics"
     ]
     
     for symbol, lista_eventi in dizionario_dividendi.items():
-        for dt, tipo in lista_eventi:
-            dt_str = dt.strftime('%Y%m%d')
-            dt_end_str = (dt + timedelta(days=1)).strftime('%Y%m%d')
+        for ev in lista_eventi:
+            ex_dt = ev['ex_date']
+            ex_type = ev['ex_type']
+            pay_dt = ev['pay_date']
+            pay_type = ev['pay_type']
             
-            if tipo == 'PROIETTO':
-                uid = f"dividend-proj-{symbol}-{dt_str}@portafoglio"
-                summary = f"Stacco Cedola [STIMA]: {symbol}"
-                description = f"[PROIEZIONE STIMATA] Data stimata basata sulla frequenza storica per la posizione {symbol}. Da verificare."
+            ex_str = ex_dt.strftime('%Y%m%d')
+            ex_end_str = (ex_dt + timedelta(days=1)).strftime('%Y%m%d')
+            
+            pay_str = pay_dt.strftime('%Y%m%d')
+            pay_end_str = (pay_dt + timedelta(days=1)).strftime('%Y%m%d')
+            
+            # 1. Evento Ex-Date
+            if ex_type == 'PROIETTO':
+                uid_ex = f"dividend-ex-proj-{symbol}-{ex_str}@portafoglio"
+                summary_ex = f"Stacco Cedola [STIMA]: {symbol}"
+                desc_ex = f"[PROIEZIONE STIMATA] Data di stacco stimata basata sulla frequenza storica per la posizione {symbol}. Da verificare."
             else:
-                uid = f"dividend-conf-{symbol}-{dt_str}@portafoglio"
-                summary = f"Stacco Cedola: {symbol}"
-                description = f"Data di stacco / pagamento confermata da dati ufficiali o verificata online per la posizione {symbol}."
+                uid_ex = f"dividend-ex-conf-{symbol}-{ex_str}@portafoglio"
+                summary_ex = f"Stacco Cedola: {symbol}"
+                desc_ex = f"Data di stacco confermata da dati ufficiali o verificata online per la posizione {symbol}."
             
             righe_ics.extend([
                 "BEGIN:VEVENT",
-                f"UID:{uid}",
+                f"UID:{uid_ex}",
                 f"DTSTAMP:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}",
-                f"DTSTART;VALUE=DATE:{dt_str}",
-                f"DTEND;VALUE=DATE:{dt_end_str}",
-                f"SUMMARY:{summary}",
-                f"DESCRIPTION:{description}",
+                f"DTSTART;VALUE=DATE:{ex_str}",
+                f"DTEND;VALUE=DATE:{ex_end_str}",
+                f"SUMMARY:{summary_ex}",
+                f"DESCRIPTION:{desc_ex}",
+                "END:VEVENT"
+            ])
+            
+            # 2. Evento Payment Date
+            if pay_type == 'PROIETTO':
+                uid_pay = f"dividend-pay-proj-{symbol}-{pay_str}@portafoglio"
+                summary_pay = f"Pagamento Cedola [STIMA]: {symbol}"
+                desc_pay = f"[PROIEZIONE STIMATA] Data di pagamento stimata per la posizione {symbol}."
+            else:
+                uid_pay = f"dividend-pay-conf-{symbol}-{pay_str}@portafoglio"
+                summary_pay = f"Pagamento Cedola: {symbol}"
+                desc_pay = f"Data di pagamento confermata da dati ufficiali per la posizione {symbol}."
+            
+            righe_ics.extend([
+                "BEGIN:VEVENT",
+                f"UID:{uid_pay}",
+                f"DTSTAMP:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}",
+                f"DTSTART;VALUE=DATE:{pay_str}",
+                f"DTEND;VALUE=DATE:{pay_end_str}",
+                f"SUMMARY:{summary_pay}",
+                f"DESCRIPTION:{desc_pay}",
                 "END:VEVENT"
             ])
             
